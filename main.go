@@ -14,11 +14,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lithammer/fuzzysearch/fuzzy"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+)
+
+const VERSION string = "1.0.3"
+const AUTHOR string = "https://github.com/itspacchu"
+
+var (
+	fupServer       string
+	didIWarnAlready bool = false
 )
 
 func getPodLogs(pod corev1.Pod, clientset *kubernetes.Clientset, stdout bool) string {
@@ -41,9 +50,17 @@ func getPodLogs(pod corev1.Pod, clientset *kubernetes.Clientset, stdout bool) st
 	return string(rawPodLogs)
 }
 
-func uploadFile(filepath string, expires int, nameurl string) (string, error) {
+func uploadFile(filepath string, expires int) (string, error) {
 	file, err := os.Open(filepath)
-	const url string = "http://0x0.st/"
+	url := fupServer
+	if url == "" {
+		if !didIWarnAlready {
+			fmt.Printf(color.Yellow + "WARN" + color.Reset + ": No FUP server provided using default https://0x0.st (This UPLOADS Everything!!!) \n")
+			didIWarnAlready = true
+		}
+
+		url = "https://0x0.st"
+	}
 	if err != nil {
 		return "", err
 	}
@@ -89,19 +106,29 @@ func uploadFile(filepath string, expires int, nameurl string) (string, error) {
 }
 
 func main() {
+	var printVersion bool
 	var kubeconfig *string
 	var namespace string
 	var filename string
 	var upload bool
+	var fuzzymode string
 	if home := homedir.HomeDir(); home != "" {
 		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
 	} else {
 		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
 	flag.StringVar(&namespace, "n", "", "Namespace to fetch pod logs from")
-	flag.StringVar(&filename, "f", "", "File to export logs to")
-	flag.BoolVar(&upload, "u", false, "Upload to 0x0.st")
+	flag.StringVar(&filename, "o", "", "File to output logs to")
+	flag.StringVar(&filename, "s", "", "FUP server to use (defaults to https://0x0.st)")
+	flag.BoolVar(&upload, "u", false, "Upload to fup server")
+	flag.BoolVar(&printVersion, "v", false, "Version info printing")
+	flag.StringVar(&fuzzymode, "f", "", "Fuzzy Search pod names in namespace")
 	flag.Parse()
+
+	if printVersion {
+		fmt.Printf("Version %s\nAuthor: %s\n", VERSION, AUTHOR)
+		return
+	}
 
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
@@ -119,16 +146,22 @@ func main() {
 	if err != nil {
 		panic(err.Error())
 	}
+	if !upload {
+		fmt.Printf(color.Green+"INFO"+color.Reset+": Fetching Pod logs for %s namespace :\n", namespace)
+	} else {
+		fmt.Printf(color.Green+"INFO"+color.Reset+": Writing Pod logs for %s namespace to %s:\n", namespace, filename)
+	}
 	for _, pod := range pods.Items {
+		if !fuzzy.Match(fuzzymode, pod.Name) && fuzzymode != "" {
+			continue
+		}
 		if filename == "" && !upload {
-			fmt.Printf(color.Green+"INFO"+color.Reset+": Fetching Pod logs for %s namespace :\n", namespace)
 			getPodLogs(pod, clientset, true)
 			fmt.Println("---")
 		} else {
 			if upload && filename == "" {
 				filename = "tmp"
 			}
-			fmt.Printf(color.Green+"INFO"+color.Reset+": Writing Pod logs for %s namespace to %s:\n", namespace, filename)
 			if filename != "" {
 				foldername := strings.Split(filename, ".")[0]
 				podpath := foldername + "/" + pod.Namespace + "_" + filename
@@ -141,7 +174,7 @@ func main() {
 				os.WriteFile(podpath, []byte(getPodLogs(pod, clientset, false)), 0644)
 				if upload {
 					upload_url, _ := uploadFile(podpath, 1)
-					fmt.Println(color.Blue + "http://0x0.st - " + color.Purple + "( " + pod.Name + " )" + color.Reset + ": " + upload_url)
+					fmt.Println(color.Blue + fupServer + " - " + color.Purple + "( " + pod.Name + " )" + color.Reset + ": " + upload_url)
 					if filename == "" {
 						os.Remove(podpath)
 					}
